@@ -88,5 +88,20 @@ class RSSM:
     def parameters(self):
         return list(self.dynamics.parameters()) + list(self.encoder.parameters()) + list(self.decoder.parameters()) + list(self.reward_model.parameters())
 
+    def save(self, path: str):
+        torch.save({
+            "dynamics": self.dynamics.state_dict(),
+            "encoder": self.encoder.state_dict(),
+            "decoder": self.decoder.state_dict(),
+            "reward_model": self.reward_model.state_dict()
+        }, path)
+
+    def load(self, path: str):
+        checkpoint = torch.load(path)
+        self.dynamics.load_state_dict(checkpoint["dynamics"])
+        self.encoder.load_state_dict(checkpoint["encoder"])
+        self.decoder.load_state_dict(checkpoint["decoder"])
+        self.reward_model.load_state_dict(checkpoint["reward_model"])
+
 if __name__ == "__main__":
     pass

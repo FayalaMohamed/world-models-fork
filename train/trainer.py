@@ -12,16 +12,16 @@ import logging
 
 from models.rssm import *
 from models.dynamics import DynamicsModel
-from train.buffer import Buffer
+from torch.utils.tensorboard import SummaryWriter
 from env.agent import Agent
 from env.envs import make_env
 
 logging.basicConfig(
-    level=logging.INFO,  # Set default logging level
-    format="%(asctime)s - %(levelname)s - %(message)s",  # Define log format
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),  # Output logs to console
-        logging.FileHandler("training.log", mode="w")  # Save logs to a file
+        logging.FileHandler("training.log", mode="w")
     ]
 )
 
@@ -34,6 +34,8 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         self.agent = agent
+
+        self.writer = SummaryWriter()
 
     def collect_data(self, num_steps: int):
         self.agent.collect_data(num_steps)
@@ -64,17 +66,26 @@ class Trainer:
         decoded_obs = self.rssm.decoder(hiddens_reshaped, posterior_states_reshaped)
         decoded_obs = decoded_obs.reshape(batch_size, seq_len, *obs.shape[-3:])
 
+        reward_params = self.rssm.reward_model(hiddens, posterior_states)
+        mean, logvar = torch.chunk(reward_params, 2, dim=-1)
+        logvar = F.softplus(logvar)
+        reward_dist = Normal(mean, torch.exp(logvar))
+        predicted_rewards = reward_dist.rsample()
+
         if save_images:
             batch_idx = np.random.randint(0, batch_size)
-            seq_idx = np.random.randint(0, seq_len - 1)
-            fig = self._visualize(obs, decoded_obs, batch_idx, seq_idx, iteration, grayscale=obs.shape[-3] == 1)
+            seq_idx = np.random.randint(0, seq_len - 3)
+            fig = self._visualize(obs, decoded_obs, rewards, predicted_rewards, batch_idx,
+                                  seq_idx, iteration, grayscale=True)
             if not os.path.exists("reconstructions"):
                 os.makedirs("reconstructions")
             fig.savefig(f"reconstructions/iteration_{iteration}.png")
+            self.writer.add_figure("Reconstructions", fig, iteration)
+            plt.close(fig)
 
         reconstruction_loss = self._reconstruction_loss(decoded_obs, obs)
         kl_loss = self._kl_loss(prior_means, F.softplus(prior_logvars), posterior_means, F.softplus(posterior_logvars))
-        reward_loss = self._reward_loss(rewards, hiddens, posterior_states)
+        reward_loss = self._reward_loss(rewards, predicted_rewards)
 
         loss = reconstruction_loss + kl_loss + reward_loss
 
@@ -90,9 +101,20 @@ class Trainer:
         iterator = tqdm(range(iterations), desc="Training", total=iterations)
         losses = []
         infos = []
+        last_loss = float("inf")
         for i in iterator:
             loss, reconstruction_loss, kl_loss, reward_loss = self.train_batch(batch_size, seq_len, i,
-                                                                               save_images=i % 20 == 0)
+                                                                               save_images=i % 100 == 0)
+
+            self.writer.add_scalar("Loss", loss, i)
+            self.writer.add_scalar("Reconstruction Loss", reconstruction_loss, i)
+            self.writer.add_scalar("KL Loss", kl_loss, i)
+            self.writer.add_scalar("Reward Loss", reward_loss, i)
+
+            if loss < last_loss:
+                self.rssm.save("rssm.pth")
+                last_loss = loss
+
             info = {
                 "Loss": loss,
                 "Reconstruction Loss": reconstruction_loss,
@@ -103,33 +125,46 @@ class Trainer:
             infos.append(info)
 
             if i % 10 == 0:
-                logger.info(f"\nLoss: {loss:.4f}")
+                logger.info("\n----------------------------")
+                logger.info(f"Iteration: {i}")
+                logger.info(f"Loss: {loss:.4f}")
                 logger.info(f"Running average last 20 losses: {sum(losses[-20:]) / 20: .4f}")
                 logger.info(f"Reconstruction Loss: {reconstruction_loss:.4f}")
                 logger.info(f"KL Loss: {kl_loss:.4f}")
                 logger.info(f"Reward Loss: {reward_loss:.4f}")
 
-    def _visualize(self, obs, decoded_obs, batch_idx, seq_idx, iterations: int, grayscale: bool = True):
-        obs = obs[batch_idx, seq_idx: seq_idx + 2]
-        decoded_obs = decoded_obs[batch_idx, seq_idx: seq_idx + 2]
+    def _visualize(self, obs, decoded_obs, rewards, predicted_rewwards, batch_idx, seq_idx, iterations: int, grayscale: bool = True):
+        obs = obs[batch_idx, seq_idx: seq_idx + 3]
+        decoded_obs = decoded_obs[batch_idx, seq_idx: seq_idx + 3]
+
+        rewards = rewards[batch_idx, seq_idx: seq_idx + 3]
+        predicted_rewards = predicted_rewwards[batch_idx, seq_idx: seq_idx + 3]
 
         obs = obs.cpu().detach().numpy()
         decoded_obs = decoded_obs.cpu().detach().numpy()
 
-        fig, axs = plt.subplots(2, 2)
+        fig, axs = plt.subplots(3, 2)
         axs[0][0].imshow(obs[0, ..., 0], cmap="gray" if grayscale else None)
-        axs[0][0].set_title(f"Original Image: Iteration: {iterations}")
+        axs[0][0].set_title(f"Iteration: {iterations} -- Reward: {rewards[0, 0]:.4f} Predicted Reward: {predicted_rewards[0, 0]:.4f}")
         axs[0][0].axis("off")
         axs[0][1].imshow(decoded_obs[0, ..., 0], cmap="gray" if grayscale else None)
-        axs[0][1].set_title(f"Reconstructed Image: Iteration: {iterations}")
+        axs[0][1].set_title(f"Pred. Reward: {predicted_rewards[0, 0]:.4f}")
+
         axs[0][1].axis("off")
 
-        axs[1][0].imshow(obs[0, ..., 0], cmap="gray" if grayscale else None)
-        axs[1][0].set_title(f"Original Image t+1: Iteration: {iterations}")
+        axs[1][0].imshow(obs[1, ..., 0], cmap="gray" if grayscale else None)
         axs[1][0].axis("off")
-        axs[1][1].imshow(decoded_obs[0, ..., 0], cmap="gray" if grayscale else None)
-        axs[1][1].set_title(f"Reconstructed Image t+1: Iteration: {iterations}")
+        axs[1][0].set_title(f"Reward: {rewards[1, 0]:.4f} Predicted Reward: {predicted_rewards[1, 0]:.4f}")
+        axs[1][1].imshow(decoded_obs[1, ..., 0], cmap="gray" if grayscale else None)
+        axs[1][1].set_title(f"Pred. Reward: {predicted_rewards[1, 0]:.4f}")
         axs[1][1].axis("off")
+
+        axs[2][0].imshow(obs[2, ..., 0], cmap="gray" if grayscale else None)
+        axs[2][0].axis("off")
+        axs[2][0].set_title(f"Reward: {rewards[2, 0]:.4f}")
+        axs[2][1].imshow(decoded_obs[2, ..., 0], cmap="gray" if grayscale else None)
+        axs[2][1].set_title(f"Pred. Reward: {predicted_rewards[2, 0]:.4f}")
+        axs[2][1].axis("off")
 
         return fig
 
@@ -142,13 +177,7 @@ class Trainer:
 
         return kl_divergence(posterior_dist, prior_dist).mean()
 
-    def _reward_loss(self, rewards, hiddens, states):
-        reward_params = self.rssm.reward_model(hiddens, states)
-        mean, logvar = torch.chunk(reward_params, 2, dim=-1)
-        logvar = F.softplus(logvar)
-        reward_dist = Normal(mean, torch.exp(logvar))
-        predicted_rewards = reward_dist.rsample()
-
+    def _reward_loss(self, rewards, predicted_rewards):
         return F.mse_loss(predicted_rewards, rewards)
 
 
@@ -175,7 +204,8 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.Adam(rssm.parameters(), lr=1e-3)
     agent = Agent(env, rssm)
+    agent.buffer.load("buffer.npz")
     trainer = Trainer(rssm, agent, optimizer=optimizer, device="mps")
-    trainer.collect_data(10000)
-    trainer.save_buffer("buffer.npz")
+    #trainer.collect_data(10000)
+    #trainer.save_buffer("buffer.npz")
     trainer.train(1000, 32, 20)
