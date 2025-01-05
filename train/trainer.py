@@ -145,7 +145,7 @@ class Trainer:
 
         fig, axs = plt.subplots(3, 2)
         axs[0][0].imshow(obs[0, ..., 0], cmap="gray" if grayscale else None)
-        axs[0][0].set_title(f"Iteration: {iterations} -- Reward: {rewards[0, 0]:.4f} Predicted Reward: {predicted_rewards[0, 0]:.4f}")
+        axs[0][0].set_title(f"Iteration: {iterations} -- Reward: {rewards[0, 0]:.4f}")
         axs[0][0].axis("off")
         axs[0][1].imshow(decoded_obs[0, ..., 0], cmap="gray" if grayscale else None)
         axs[0][1].set_title(f"Pred. Reward: {predicted_rewards[0, 0]:.4f}")
@@ -154,7 +154,7 @@ class Trainer:
 
         axs[1][0].imshow(obs[1, ..., 0], cmap="gray" if grayscale else None)
         axs[1][0].axis("off")
-        axs[1][0].set_title(f"Reward: {rewards[1, 0]:.4f} Predicted Reward: {predicted_rewards[1, 0]:.4f}")
+        axs[1][0].set_title(f"Reward: {rewards[1, 0]:.4f} ")
         axs[1][1].imshow(decoded_obs[1, ..., 0], cmap="gray" if grayscale else None)
         axs[1][1].set_title(f"Pred. Reward: {predicted_rewards[1, 0]:.4f}")
         axs[1][1].axis("off")
@@ -206,6 +206,6 @@ if __name__ == "__main__":
     agent = Agent(env, rssm)
     agent.buffer.load("buffer.npz")
     trainer = Trainer(rssm, agent, optimizer=optimizer, device="mps")
-    #trainer.collect_data(10000)
-    #trainer.save_buffer("buffer.npz")
-    trainer.train(1000, 32, 20)
+    trainer.collect_data(20000)
+    trainer.save_buffer("buffer.npz")
+    trainer.train(10000, 32, 20)

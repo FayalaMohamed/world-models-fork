@@ -48,3 +48,12 @@ class Agent:
             if done:
                 obs = self.env.reset()
 
+    def imagine_rollout(self, prev_hidden: torch.Tensor, prev_state: torch.Tensor, actions: torch.Tensor):
+
+        hiddens, prior_states, posterior_states, prior_means, prior_logvars, posterior_means, posterior_logvars = self.rssm.generate_rollout(actions, prev_hidden, prev_state)
+
+        # We are in the imagaination phase, so we need to use the prior as we do not have access to the true posterior
+        rewards = self.rssm.predict_reward(hiddens, prior_states)
+
+        return hiddens, prior_states, posterior_states, prior_means, prior_logvars, posterior_means, posterior_logvars
+
