@@ -2,3 +2,5 @@
 *.npz
 *.log
 *.pyc
+
+.idea/
