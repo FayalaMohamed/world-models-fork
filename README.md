@@ -17,6 +17,9 @@ The repository is structured as follows:
 - `envs/`: Contains the environment wrappers used in the algorithms.
 - `train`: Contains the training scripts for the algorithms.
 
+### Blog post
+Corresponding blog post where all the math is derived can be found here:
+https://medium.com/@lukasbierling/training-agents-to-plan-in-latent-space-a-technical-overview-f4380a94ec88
 
 ### Example algorithm of MBRL in the dreamer paper
 ![img.png](img.jpg) source: https://arxiv.org/pdf/1912.01603
