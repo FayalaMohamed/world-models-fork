@@ -8,6 +8,7 @@ class DynamicsModel(nn.Module):
         super(DynamicsModel, self).__init__()
 
         self.hidden_dim = hidden_dim
+        self.embedding_dim = embedding_dim
 
         self.rnn = nn.ModuleList([nn.GRUCell(hidden_dim, hidden_dim) for _ in range(rnn_layer)])
         self.project_state_action = nn.Linear(action_dim + state_dim, hidden_dim)
@@ -21,6 +22,22 @@ class DynamicsModel(nn.Module):
         self.state_dim = state_dim
 
         self.act_fn = nn.ReLU()
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize model weights to prevent gradient explosion"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.GRUCell):
+                for name, param in m.named_parameters():
+                    if 'weight' in name:
+                        nn.init.orthogonal_(param)
+                    elif 'bias' in name:
+                        nn.init.zeros_(param)
 
     def forward(self, prev_hidden: torch.Tensor, prev_state: torch.Tensor, actions: torch.Tensor,
                 obs: torch.Tensor = None, dones: torch.Tensor = None):
@@ -28,7 +45,7 @@ class DynamicsModel(nn.Module):
         Forward pass of the dynamics model for one time step.
         :param prev_hidden: Previous hidden state of the RNN: (batch_size, hidden_dim)
         :param prev_state: Previous stochastic state: (batch_size, state_dim)
-        :param action: One hot encoded actions: (sequence_length, batch_size, action_dim)
+        :param actions: One hot encoded actions: (sequence_length, batch_size, action_dim)
         :param obs: This is the encoded observation from the encoder, not the raw observation!: (sequence_length, batch_size, embedding_dim)
         :return:
         """

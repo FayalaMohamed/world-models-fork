@@ -21,8 +21,8 @@ class RSSM:
 
         Args:
             encoder: Encoder network for deterministic state
-            prior_model: Prior network for stochastic state
             decoder: Decoder network for reconstructing observation
+            prior_model: Prior network for stochastic state
             sequence_model: Recurrent model for deterministic state
             hidden_dim: Hidden dimension of the RNN
             latent_dim: Latent dimension of the stochastic state
@@ -97,7 +97,7 @@ class RSSM:
         }, path)
 
     def load(self, path: str):
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, weights_only=True)
         self.dynamics.load_state_dict(checkpoint["dynamics"])
         self.encoder.load_state_dict(checkpoint["encoder"])
         self.decoder.load_state_dict(checkpoint["decoder"])

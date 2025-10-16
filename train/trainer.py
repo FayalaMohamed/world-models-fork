@@ -53,24 +53,46 @@ class Trainer:
         rewards = torch.tensor(rewards, requires_grad=True).float().to(self.device)
         dones = torch.tensor(dones).float().to(self.device)
 
+        """
+            obs: (batch_size, seq_len, height, width, channels)
+            actions: (batch_size, seq_len, action_dim) (one-hot)
+            rewards: (batch_size, seq_len, 1)
+            dones: (batch_size, seq_len, 1)
+        """
+
         encoded_obs = self.rssm.encoder(obs.reshape(-1, *obs.shape[2:]).permute(0, 3, 1, 2))
         encoded_obs = encoded_obs.reshape(batch_size, seq_len, -1)
 
         rollout = self.rssm.generate_rollout(actions, obs=encoded_obs, dones=dones)
 
         hiddens, prior_states, posterior_states, prior_means, prior_logvars, posterior_means, posterior_logvars = rollout
-
-        hiddens_reshaped = hiddens.reshape(batch_size * seq_len, -1)
-        posterior_states_reshaped = posterior_states.reshape(batch_size * seq_len, -1)
+        
+        """
+            hiddens: Deterministic recurrent states
+            prior_states: States predicted from previous timestep (without current observation)
+            posterior_states: States inferred using current observation
+            prior_means/logvars: Parameters of prior distributions
+            posterior_means/logvars: Parameters of posterior distributions
+        """
+        hiddens_reshaped = hiddens.reshape(batch_size * seq_len, -1) # from (B, S, hidden_dim) to (B*S, hidden_dim)
+        posterior_states_reshaped = posterior_states.reshape(batch_size * seq_len, -1) # from (B, S, state_dim) to (B*S, state_dim)
 
         decoded_obs = self.rssm.decoder(hiddens_reshaped, posterior_states_reshaped)
-        decoded_obs = decoded_obs.reshape(batch_size, seq_len, *obs.shape[-3:])
+        decoded_obs = decoded_obs.reshape(batch_size, seq_len, *obs.shape[-3:]) # back to (B, S, C, H, W)
 
+        
         reward_params = self.rssm.reward_model(hiddens, posterior_states)
         mean, logvar = torch.chunk(reward_params, 2, dim=-1)
         logvar = F.softplus(logvar)
         reward_dist = Normal(mean, torch.exp(logvar))
         predicted_rewards = reward_dist.rsample()
+
+        """
+            Uses the state representations to predict rewards
+            Outputs parameters for a normal distribution (mean and log-variance)
+            Uses softplus to ensure positive variance
+            Samples from the predicted reward distribution using reparameterization trick
+        """
 
         if save_images:
             batch_idx = np.random.randint(0, batch_size)
