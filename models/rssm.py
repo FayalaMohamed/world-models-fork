@@ -96,6 +96,44 @@ class RSSM:
             "reward_model": self.reward_model.state_dict()
         }, path)
 
+    def step(self, h, s, action, z=None):
+        """
+        Perform a single RSSM transition given previous states and one action.
+        h: (B, hidden_dim)
+        s: (B, state_dim)
+        action: (B, action_dim)
+        z: (B, embedding_dim) optional encoded observation
+        returns: next_h, next_s
+        """
+        sa = torch.cat([s, action], dim=-1)
+        sa = torch.relu(self.dynamics.project_state_action(sa))
+
+        # ---- update deterministic hidden state ----
+        for gru in self.dynamics.rnn:
+            h = gru(sa, h)
+
+        # ---- compute prior ----
+        ha = torch.cat([h, action], dim=-1)
+        ha = torch.relu(self.dynamics.project_hidden_action(ha))
+        prior_params = self.dynamics.prior(ha)
+        prior_mean, prior_logvar = torch.chunk(prior_params, 2, dim=-1)
+        prior_std = torch.exp(torch.nn.functional.softplus(prior_logvar))
+        prior_state = torch.distributions.Normal(prior_mean, prior_std).rsample()
+
+        # ---- posterior (if z available) ----
+        if z is not None:
+            ho = torch.cat([h, z], dim=-1)
+            ho = torch.relu(self.dynamics.project_hidden_obs(ho))
+            posterior_params = self.dynamics.posterior(ho)
+            post_mean, post_logvar = torch.chunk(posterior_params, 2, dim=-1)
+            post_std = torch.exp(torch.nn.functional.softplus(post_logvar))
+            post_state = torch.distributions.Normal(post_mean, post_std).rsample()
+        else:
+            post_state = prior_state
+
+        return h, post_state
+
+    
     def load(self, path: str):
         checkpoint = torch.load(path, weights_only=True)
         self.dynamics.load_state_dict(checkpoint["dynamics"])
