@@ -1,0 +1,231 @@
+import numpy as np
+import torch
+import os
+from torch.nn import functional as F
+from torch.distributions import Normal
+from torch.distributions.kl import kl_divergence
+from typing import Callable
+import matplotlib.pyplot as plt
+from gymnasium import Env
+from tqdm import tqdm
+import logging
+import sys
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from models.rssm import *
+from models.dynamics import DynamicsModel
+from torch.utils.tensorboard import SummaryWriter
+from env.agent import Agent
+from env.envs import make_env
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),  # Output logs to console
+        logging.FileHandler("training.log", mode="w")
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+
+class Evaluator:
+    def __init__(self, rssm: RSSM, agent: Agent, optimizer: torch.optim.Optimizer, device: torch.device):
+        self.rssm = rssm
+        self.optimizer = optimizer
+        self.device = device
+        self.agent = agent
+
+    def collect_data(self, num_steps: int):
+        self.agent.collect_data(num_steps)
+
+    def save_buffer(self, path: str):
+        self.agent.buffer.save(path)
+
+    def eval_batch(self, batch_size: int, seq_len: int, iteration: int, save_images: bool = False):
+        obs, actions, rewards, dones = self.agent.buffer.sample(batch_size, seq_len)
+
+        actions = torch.tensor(actions).long().to(self.device)
+        actions = F.one_hot(actions, self.rssm.action_dim).float()
+
+        obs = torch.tensor(obs, requires_grad=True).float().to(self.device)
+        rewards = torch.tensor(rewards, requires_grad=True).float().to(self.device)
+        dones = torch.tensor(dones).float().to(self.device)
+
+        """
+            obs: (batch_size, seq_len, height, width, channels)
+            actions: (batch_size, seq_len, action_dim) (one-hot)
+            rewards: (batch_size, seq_len, 1)
+            dones: (batch_size, seq_len, 1)
+        """
+
+        encoded_obs = self.rssm.encoder(obs.reshape(-1, *obs.shape[2:]).permute(0, 3, 1, 2))
+        encoded_obs = encoded_obs.reshape(batch_size, seq_len, -1)
+
+        rollout = self.rssm.generate_rollout(actions, obs=encoded_obs, dones=dones)
+
+        hiddens, prior_states, posterior_states, prior_means, prior_logvars, posterior_means, posterior_logvars = rollout
+        
+        """
+            hiddens: Deterministic recurrent states
+            prior_states: States predicted from previous timestep (without current observation)
+            posterior_states: States inferred using current observation
+            prior_means/logvars: Parameters of prior distributions
+            posterior_means/logvars: Parameters of posterior distributions
+        """
+        hiddens_reshaped = hiddens.reshape(batch_size * seq_len, -1) # from (B, S, hidden_dim) to (B*S, hidden_dim)
+        posterior_states_reshaped = posterior_states.reshape(batch_size * seq_len, -1) # from (B, S, state_dim) to (B*S, state_dim)
+
+        decoded_obs = self.rssm.decoder(hiddens_reshaped, posterior_states_reshaped)
+        decoded_obs = decoded_obs.reshape(batch_size, seq_len, *obs.shape[-3:]) # back to (B, S, C, H, W)
+
+        
+        reward_params = self.rssm.reward_model(hiddens, posterior_states)
+        mean, logvar = torch.chunk(reward_params, 2, dim=-1)
+        logvar = F.softplus(logvar)
+        reward_dist = Normal(mean, torch.exp(logvar))
+        predicted_rewards = reward_dist.rsample()
+
+        """
+            Uses the state representations to predict rewards
+            Outputs parameters for a normal distribution (mean and log-variance)
+            Uses softplus to ensure positive variance
+            Samples from the predicted reward distribution using reparameterization trick
+        """
+
+        if save_images:
+            batch_idx = np.random.randint(0, batch_size)
+            seq_idx = np.random.randint(0, seq_len - 3)
+            fig = self._visualize(obs, decoded_obs, rewards, predicted_rewards, batch_idx,
+                                  seq_idx, iteration, grayscale=True)
+            if not os.path.exists("Evalreconstructions"):
+                os.makedirs("Evalreconstructions")
+            fig.savefig(f"Evalreconstructions/iteration_{iteration}.png")
+            
+            plt.close(fig)
+
+        reconstruction_loss = self._reconstruction_loss(decoded_obs, obs)
+        kl_loss = self._kl_loss(prior_means, F.softplus(prior_logvars), posterior_means, F.softplus(posterior_logvars))
+        reward_loss = self._reward_loss(rewards, predicted_rewards)
+
+        loss = reconstruction_loss + kl_loss + reward_loss
+
+        return loss.item(), reconstruction_loss.item(), kl_loss.item(), reward_loss.item()
+
+    def eval(self, iterations: int, batch_size: int, seq_len: int):
+        self.rssm.eval()
+        iterator = tqdm(range(iterations), desc="Evaluating", total=iterations)
+        losses = []
+        infos = []
+        last_loss = float("inf")
+        for i in iterator:
+            loss, reconstruction_loss, kl_loss, reward_loss = self.eval_batch(batch_size, seq_len, i,
+                                                                               save_images=i % 100 == 0)
+
+            if loss < last_loss:
+                last_loss = loss
+
+            info = {
+                "Loss": loss,
+                "Reconstruction Loss": reconstruction_loss,
+                "KL Loss": kl_loss,
+                "Reward Loss": reward_loss
+            }
+            losses.append(loss)
+            infos.append(info)
+
+            if i % 10 == 0:
+                logger.info("\n----------------------------")
+                logger.info(f"Iteration: {i}")
+                logger.info(f"Loss: {loss:.4f}")
+                logger.info(f"Running average last 20 losses: {sum(losses[-20:]) / 20: .4f}")
+                logger.info(f"Reconstruction Loss: {reconstruction_loss:.4f}")
+                logger.info(f"KL Loss: {kl_loss:.4f}")
+                logger.info(f"Reward Loss: {reward_loss:.4f}")
+
+    def _visualize(self, obs, decoded_obs, rewards, predicted_rewwards, batch_idx, seq_idx, iterations: int, grayscale: bool = True):
+        obs = obs[batch_idx, seq_idx: seq_idx + 3]
+        decoded_obs = decoded_obs[batch_idx, seq_idx: seq_idx + 3]
+
+        rewards = rewards[batch_idx, seq_idx: seq_idx + 3]
+        predicted_rewards = predicted_rewwards[batch_idx, seq_idx: seq_idx + 3]
+
+        obs = obs.cpu().detach().numpy()
+        decoded_obs = decoded_obs.cpu().detach().numpy()
+
+        fig, axs = plt.subplots(3, 2)
+        axs[0][0].imshow(obs[0, ..., 0], cmap="gray" if grayscale else None)
+        axs[0][0].set_title(f"Iteration: {iterations} -- Reward: {rewards[0, 0]:.4f}")
+        axs[0][0].axis("off")
+        axs[0][1].imshow(decoded_obs[0, ..., 0], cmap="gray" if grayscale else None)
+        axs[0][1].set_title(f"Pred. Reward: {predicted_rewards[0, 0]:.4f}")
+
+        axs[0][1].axis("off")
+
+        axs[1][0].imshow(obs[1, ..., 0], cmap="gray" if grayscale else None)
+        axs[1][0].axis("off")
+        axs[1][0].set_title(f"Reward: {rewards[1, 0]:.4f} ")
+        axs[1][1].imshow(decoded_obs[1, ..., 0], cmap="gray" if grayscale else None)
+        axs[1][1].set_title(f"Pred. Reward: {predicted_rewards[1, 0]:.4f}")
+        axs[1][1].axis("off")
+
+        axs[2][0].imshow(obs[2, ..., 0], cmap="gray" if grayscale else None)
+        axs[2][0].axis("off")
+        axs[2][0].set_title(f"Reward: {rewards[2, 0]:.4f}")
+        axs[2][1].imshow(decoded_obs[2, ..., 0], cmap="gray" if grayscale else None)
+        axs[2][1].set_title(f"Pred. Reward: {predicted_rewards[2, 0]:.4f}")
+        axs[2][1].axis("off")
+
+        return fig
+
+    def _reconstruction_loss(self, decoded_obs, obs):
+        return F.mse_loss(decoded_obs, obs)
+
+    def _kl_loss(self, prior_means, prior_logvars, posterior_means, posterior_logvars):
+        prior_dist = Normal(prior_means, torch.exp(prior_logvars))
+        posterior_dist = Normal(posterior_means, torch.exp(posterior_logvars))
+
+        return kl_divergence(posterior_dist, prior_dist).mean()
+
+    def _reward_loss(self, rewards, predicted_rewards):
+        return F.mse_loss(predicted_rewards, rewards)
+
+
+if __name__ == "__main__":
+    env = make_env("CarRacing-v3", render_mode="rgb_array", continuous=False, grayscale=True)
+    hidden_size = 1024
+    embedding_dim = 1024
+    state_dim = 512
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    encoder = EncoderCNN(in_channels=1, embedding_dim=embedding_dim)
+    decoder = DecoderCNN(hidden_size=hidden_size, state_size=state_dim, embedding_size=embedding_dim,
+                         output_shape=(1,128,128))
+    reward_model = RewardModel(hidden_dim=hidden_size, state_dim=state_dim)
+    dynamics_model = DynamicsModel(hidden_dim=hidden_size, state_dim=state_dim, action_dim=5, embedding_dim=embedding_dim)
+
+    rssm = RSSM(dynamics_model=dynamics_model,
+                encoder=encoder,
+                decoder=decoder,
+                reward_model=reward_model,
+                hidden_dim=hidden_size,
+                state_dim=state_dim,
+                action_dim=5,
+                embedding_dim=embedding_dim,
+                device=device)
+
+    
+    agent = Agent(env, rssm)
+    evaluator = Evaluator(rssm, agent, optimizer=None, device=device)
+    rssm.load("rssm.pth")
+
+    if os.path.exists("eval_buffer_data.npz"):
+        agent.buffer.load("eval_buffer_data.npz")
+    else:
+        agent.collect_data(1000)
+        agent.buffer.save("eval_buffer_data.npz")
+    print(f"Buffer size: {agent.buffer.idx}")
+    evaluator.eval(1, 32, 20)
+    
+    

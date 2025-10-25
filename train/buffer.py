@@ -24,6 +24,7 @@ class Buffer:
 
 
     def sample(self, batch_size: int, sequence_length: int):
+        print(f"high: {(self.idx % self.buffer_size) - sequence_length}")
         starting_idxs = np.random.randint(0, (self.idx % self.buffer_size) - sequence_length, (batch_size,))
 
         index_tensor = np.stack([np.arange(start, start + sequence_length) for start in starting_idxs])
