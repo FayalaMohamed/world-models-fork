@@ -13,11 +13,17 @@ class DynamicsModel(nn.Module):
         self.rnn = nn.ModuleList([nn.GRUCell(hidden_dim, hidden_dim) for _ in range(rnn_layer)])
         self.project_state_action = nn.Linear(action_dim + state_dim, hidden_dim)
 
-        self.prior = nn.Linear(hidden_dim, state_dim * 2)
-        self.project_hidden_action = nn.Linear(hidden_dim + action_dim, hidden_dim)
+        self.prior = nn.Sequential(nn.Linear(hidden_dim, state_dim * 2), 
+                                   nn.BatchNorm1d(state_dim * 2))
+        
+        self.project_hidden_action = nn.Sequential(nn.Linear(hidden_dim + action_dim, hidden_dim),
+                                                    nn.BatchNorm1d(hidden_dim))
 
-        self.posterior = nn.Linear(hidden_dim, state_dim * 2)
-        self.project_hidden_obs = nn.Linear(hidden_dim + embedding_dim, hidden_dim)
+        self.posterior = nn.Sequential(nn.Linear(hidden_dim, state_dim * 2),
+                                        nn.BatchNorm1d(state_dim * 2))
+        
+        self.project_hidden_obs = nn.Sequential(nn.Linear(hidden_dim + embedding_dim, hidden_dim),
+                                                nn.BatchNorm1d(hidden_dim))
 
         self.state_dim = state_dim
 
@@ -68,24 +74,30 @@ class DynamicsModel(nn.Module):
             action_t = actions[:, t, :]
             obs_t = obs[:, t, :] if obs is not None else torch.zeros(B, self.embedding_dim, device=actions.device)
             state_t = posterior_states_list[-1][:, 0, :] if obs is not None else prior_states_list[-1][:, 0, :]
+            #print(f"state_action: {state_t}")
             state_t = state_t if dones is None else state_t * (1 - dones[:, t, :])
             hidden_t = hiddens_list[-1][:, 0, :]
 
             state_action = torch.cat([state_t, action_t], dim=-1)
+            
+            temp = self.project_state_action(state_action)
+            #print(f"hidden_action: {temp} wiehgt: {self.project_state_action.weight}")
             state_action = self.act_fn(self.project_state_action(state_action))
-
+            #print(f"state_t: {state_action.shape}: weights norm {self.project_state_action.weight.shape}")
+            
             ### Update the deterministic hidden state ###
             for i in range(len(self.rnn)):
                 hidden_t = self.rnn[i](state_action, hidden_t)
 
             ### Determine the prior distribution ###
             hidden_action = torch.cat([hidden_t, action_t], dim=-1)
+            #print(f"hidden_action before proj: {hidden_action.shape}")
             hidden_action = self.act_fn(self.project_hidden_action(hidden_action))
             prior_params = self.prior(hidden_action)
             prior_mean, prior_logvar = torch.chunk(prior_params, 2, dim=-1)
-
+            #print(f"prior_mean: {prior_mean} prior logvar: {F.softplus(prior_logvar)}")
             ### Sample from the prior distribution ###
-            prior_dist = torch.distributions.Normal(prior_mean, torch.exp(F.softplus(prior_logvar)))
+            prior_dist = torch.distributions.Normal(prior_mean, F.softplus(prior_logvar))
             prior_state_t = prior_dist.rsample()
 
             ### Determine the posterior distribution ###

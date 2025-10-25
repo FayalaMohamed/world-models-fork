@@ -1,11 +1,11 @@
 import torch
 import numpy as np
-import gym
+import gymnasium as gym
 import cv2 as cv
 from typing import Union, Sequence, Tuple
 import collections
 
-from gym.core import ActType, ObsType
+from gymnasium.core import ActType, ObsType
 
 
 class InitialWrapper(gym.Wrapper):

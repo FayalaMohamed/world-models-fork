@@ -41,7 +41,7 @@ class EncoderCNN(nn.Module):
         x = self.conv4(x)
         x = self.bn4(x)
 
-        x = x.view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
         x = self.fc1(x)
 
         return x

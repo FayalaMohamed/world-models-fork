@@ -1,4 +1,4 @@
-from gym import Env
+from gymnasium import Env
 from typing import Callable
 from abc import ABC, abstractmethod
 import torch

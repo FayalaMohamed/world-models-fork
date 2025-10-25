@@ -6,9 +6,12 @@ from torch.distributions import Normal
 from torch.distributions.kl import kl_divergence
 from typing import Callable
 import matplotlib.pyplot as plt
-from gym import Env
+from gymnasium import Env
 from tqdm import tqdm
 import logging
+import sys
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from models.rssm import *
 from models.dynamics import DynamicsModel
@@ -204,11 +207,11 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    env = make_env("CarRacing-v2", render_mode="rgb_array", continuous=False, grayscale=True)
+    env = make_env("CarRacing-v3", render_mode="rgb_array", continuous=False, grayscale=True)
     hidden_size = 1024
     embedding_dim = 1024
     state_dim = 512
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     encoder = EncoderCNN(in_channels=1, embedding_dim=embedding_dim)
     decoder = DecoderCNN(hidden_size=hidden_size, state_size=state_dim, embedding_size=embedding_dim,
                          output_shape=(1,128,128))
@@ -222,12 +225,22 @@ if __name__ == "__main__":
                 hidden_dim=hidden_size,
                 state_dim=state_dim,
                 action_dim=5,
-                embedding_dim=embedding_dim)
+                embedding_dim=embedding_dim,
+                device=device)
 
     optimizer = torch.optim.Adam(rssm.parameters(), lr=1e-3)
     agent = Agent(env, rssm)
-    agent.buffer.load("buffer.npz")
-    trainer = Trainer(rssm, agent, optimizer=optimizer, device="mps")
-    trainer.collect_data(20000)
-    trainer.save_buffer("buffer.npz")
+    trainer = Trainer(rssm, agent, optimizer=optimizer, device=device)
+    if os.path.exists("buffer.npz"):
+        agent.buffer.load("buffer.npz")
+        """for i in range(20):
+            plt.subplot(4, 5, i+1)
+            image = agent.buffer.obs_buffer[i].squeeze()
+            print(np.max(image))
+            plt.imshow(image, cmap="gray", label=f"{i}")
+            plt.legend()"""
+    else:
+        trainer.collect_data(20000)
+        trainer.save_buffer("buffer.npz")
+    #plt.savefig("collected_data_samples.png")
     trainer.train(10000, 32, 20)
