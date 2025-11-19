@@ -11,6 +11,10 @@ from tqdm import tqdm
 import logging
 import sys
 
+import gymnasium as gym
+import ale_py
+gym.register_envs(ale_py)
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from models.rssm import *
@@ -129,7 +133,7 @@ class Trainer:
         last_loss = float("inf")
         for i in iterator:
             loss, reconstruction_loss, kl_loss, reward_loss = self.train_batch(batch_size, seq_len, i,
-                                                                               save_images=i % 100 == 0)
+                                                                               save_images=i % 1000 == 0)
 
             self.writer.add_scalar("Loss", loss, i)
             self.writer.add_scalar("Reconstruction Loss", reconstruction_loss, i)
@@ -207,7 +211,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    env = make_env("CarRacing-v3", render_mode="rgb_array", continuous=False, grayscale=True)
+    env = make_env("AlienNoFrameskip-v4", render_mode="rgb_array", continuous=False, grayscale=True)
     hidden_size = 1024
     embedding_dim = 1024
     state_dim = 512
@@ -216,7 +220,7 @@ if __name__ == "__main__":
     decoder = DecoderCNN(hidden_size=hidden_size, state_size=state_dim, embedding_size=embedding_dim,
                          output_shape=(1,128,128))
     reward_model = RewardModel(hidden_dim=hidden_size, state_dim=state_dim)
-    dynamics_model = DynamicsModel(hidden_dim=hidden_size, state_dim=state_dim, action_dim=5, embedding_dim=embedding_dim)
+    dynamics_model = DynamicsModel(hidden_dim=hidden_size, state_dim=state_dim, action_dim=18, embedding_dim=embedding_dim)
 
     rssm = RSSM(dynamics_model=dynamics_model,
                 encoder=encoder,
@@ -224,7 +228,7 @@ if __name__ == "__main__":
                 reward_model=reward_model,
                 hidden_dim=hidden_size,
                 state_dim=state_dim,
-                action_dim=5,
+                action_dim=18,
                 embedding_dim=embedding_dim,
                 device=device)
 
@@ -240,7 +244,8 @@ if __name__ == "__main__":
             plt.imshow(image, cmap="gray", label=f"{i}")
             plt.legend()"""
     else:
-        trainer.collect_data(20000)
+        trainer.collect_data(80000)
         trainer.save_buffer("buffer.npz")
     #plt.savefig("collected_data_samples.png")
-    trainer.train(10000, 32, 20)
+    trainer.train(40000, 32, 20)
+    rssm.save("rssm_final.pth")
